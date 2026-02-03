@@ -150,7 +150,36 @@ jobs:
           # Check if there are changes to commit
           if ! git diff --staged --quiet; then
             git commit -m "auto: optimize images"
-            git push
+            
+            # Pull with rebase to handle any concurrent changes
+            echo "Pulling remote changes before push..."
+            git pull --rebase origin main || {
+              echo "⚠️  Rebase conflict detected, attempting to resolve..."
+              # In case of conflicts, prefer our changes (the optimized images)
+              git checkout --ours images/
+              git add images/
+              git rebase --continue || true
+            }
+            
+            # Push with retry logic
+            MAX_RETRIES=3
+            RETRY_COUNT=0
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if git push origin main; then
+                echo "✓ Successfully pushed changes"
+                break
+              else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                  echo "⚠️  Push failed, retrying ($RETRY_COUNT/$MAX_RETRIES)..."
+                  sleep 2
+                  git pull --rebase origin main || true
+                else
+                  echo "❌ Failed to push after $MAX_RETRIES attempts"
+                  exit 1
+                fi
+              fi
+            done
           else
             echo "No changes to commit."
           fi
