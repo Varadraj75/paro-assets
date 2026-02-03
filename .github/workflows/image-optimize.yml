@@ -40,7 +40,7 @@ jobs:
 
           echo "Starting image optimization..."
           
-          # Find all source images (jpg, jpeg, png)
+          # Find all source images (jpg, jpeg, png) - explicitly exclude unsupported formats
           find "$SOURCE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | while read -r FILE; do
             # Get relative path and filename details
             # Example: images/_source/gallery/p1/img.jpg
@@ -48,6 +48,20 @@ jobs:
             REL_DIR=$(dirname "$REMAINDER")   # gallery/p1
             FILENAME=$(basename -- "$FILE")   # img.jpg
             BASENAME="${FILENAME%.*}"         # img
+            EXT="${FILENAME##*.}"             # jpg/jpeg/png
+            
+            # Skip if file is too small (likely corrupted or placeholder)
+            FILE_SIZE=$(stat -f%z "$FILE" 2>/dev/null || stat -c%s "$FILE" 2>/dev/null || echo "0")
+            if [ "$FILE_SIZE" -lt 1000 ]; then
+              echo "⚠️  Skipping $FILENAME (file too small: ${FILE_SIZE} bytes, likely corrupted)"
+              continue
+            fi
+            
+            # Check if it's actually a valid image using ImageMagick
+            if ! identify "$FILE" >/dev/null 2>&1; then
+              echo "⚠️  Skipping $FILENAME (not a valid image format or corrupted)"
+              continue
+            fi
             
             # --------------------------------------------------
             # CLASSIFICATION LOGIC
@@ -66,7 +80,7 @@ jobs:
             DEST_DIR="$DEST_ROOT/$DEST_SUB"
             mkdir -p "$DEST_DIR"
             
-            echo "Processing $FILENAME -> $DEST_DIR"
+            echo "✓ Processing $FILENAME -> $DEST_DIR"
 
             # --------------------------------------------------
             # GENERATION LOGIC
@@ -83,23 +97,46 @@ jobs:
                     return
                 fi
                 
-                echo "  Generating $TARGET ($WIDTH px)"
-                convert "$FILE" -resize "${WIDTH}x" -quality 80 -define webp:lossless=false "$TARGET"
+                echo "  → Generating $TARGET ($WIDTH px)"
+                if ! convert "$FILE" -resize "${WIDTH}x" -quality 80 -define webp:lossless=false "$TARGET" 2>/dev/null; then
+                  echo "  ⚠️  Failed to generate $TARGET"
+                  return 1
+                fi
             }
             
-            # Generate WebP variants
-            generate_variant 480
-            generate_variant 768
-            generate_variant 1280
+            # Generate WebP variants with error handling
+            generate_variant 480 || echo "  ⚠️  480px variant failed"
+            generate_variant 768 || echo "  ⚠️  768px variant failed"
+            generate_variant 1280 || echo "  ⚠️  1280px variant failed"
             
             # Generate Placeholder
             PLACEHOLDER_TARGET="$DEST_DIR/$BASENAME-blur.webp"
             if [ ! -f "$PLACEHOLDER_TARGET" ]; then
-                echo "  Generating placeholder $PLACEHOLDER_TARGET"
-                convert "$FILE" -resize 32x -blur 0x8 -quality 60 -define webp:lossless=false "$PLACEHOLDER_TARGET"
+                echo "  → Generating placeholder $PLACEHOLDER_TARGET"
+                if ! convert "$FILE" -resize 32x -blur 0x8 -quality 60 -define webp:lossless=false "$PLACEHOLDER_TARGET" 2>/dev/null; then
+                  echo "  ⚠️  Failed to generate placeholder"
+                fi
             fi
             
           done
+          
+          echo ""
+          echo "✓ Image optimization complete!"
+
+      - name: Cleanup Raw Files
+        run: |
+          set -e
+          
+          echo "Cleaning up raw source files from output directories..."
+          
+          # Remove any raw image files or non-WebP files from output directories
+          # Only .webp files should exist in hero/, gallery/, logos/ etc.
+          find images/ -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" -o -iname "*.txt" \) ! -path "images/_source/*" | while read -r FILE; do
+            echo "  🗑️  Removing raw file: $FILE"
+            rm -f "$FILE"
+          done
+          
+          echo "✓ Cleanup complete!"
 
       - name: Commit and Push
         run: |
