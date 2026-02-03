@@ -1,0 +1,119 @@
+name: Image Optimization
+
+on:
+  push:
+    paths:
+      - 'images/_source/**'
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 
+          # fetch-depth 2 ensures we have history if we wanted to check diffs, 
+          # but for this script we just process all source files. 
+          # Processing all is safer to ensure consistency, catching up on missed ones. 
+          # Since checks for existence are in place, it's efficient.
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+      - name: Optimize Images
+        run: |
+          set -e
+          
+          SOURCE_DIR="images/_source"
+          
+          # Check if source directory exists to avoid errors
+          if [ ! -d "$SOURCE_DIR" ]; then
+            echo "Source directory $SOURCE_DIR not found. Skipping."
+            exit 0
+          fi
+
+          echo "Starting image optimization..."
+          
+          # Find all source images (jpg, jpeg, png)
+          find "$SOURCE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) | while read -r FILE; do
+            # Get relative path and filename details
+            # Example: images/_source/gallery/p1/img.jpg
+            REMAINDER="${FILE#$SOURCE_DIR/}"  # gallery/p1/img.jpg
+            REL_DIR=$(dirname "$REMAINDER")   # gallery/p1
+            FILENAME=$(basename -- "$FILE")   # img.jpg
+            BASENAME="${FILENAME%.*}"         # img
+            
+            # --------------------------------------------------
+            # CLASSIFICATION LOGIC
+            # --------------------------------------------------
+            DEST_ROOT="images"
+            DEST_SUB="hero" # Default fallback
+            
+            # 1. Gallery images
+            if [[ "$REL_DIR" == "gallery"* ]]; then
+               DEST_SUB="$REL_DIR"
+            # 2. Logo images (folder logic OR naming logic)
+            elif [[ "$REL_DIR" == "logos"* ]] || [[ "$FILENAME" == logo* ]]; then
+               DEST_SUB="logos"
+            fi
+            
+            DEST_DIR="$DEST_ROOT/$DEST_SUB"
+            mkdir -p "$DEST_DIR"
+            
+            echo "Processing $FILENAME -> $DEST_DIR"
+
+            # --------------------------------------------------
+            # GENERATION LOGIC
+            # --------------------------------------------------
+            # Function to resize and convert
+            generate_variant() {
+                local WIDTH=$1
+                local SUFFIX="-$WIDTH"
+                local TARGET="$DEST_DIR/$BASENAME$SUFFIX.webp"
+                
+                if [ -f "$TARGET" ]; then
+                    # Output rules: "If an output filename already exists, it must be skipped."
+                    # echo "  Skipping $TARGET (exists)"
+                    return
+                fi
+                
+                echo "  Generating $TARGET ($WIDTH px)"
+                convert "$FILE" -resize "${WIDTH}x" -quality 80 -define webp:lossless=false "$TARGET"
+            }
+            
+            # Generate WebP variants
+            generate_variant 480
+            generate_variant 768
+            generate_variant 1280
+            
+            # Generate Placeholder
+            PLACEHOLDER_TARGET="$DEST_DIR/$BASENAME-blur.webp"
+            if [ ! -f "$PLACEHOLDER_TARGET" ]; then
+                echo "  Generating placeholder $PLACEHOLDER_TARGET"
+                convert "$FILE" -resize 32x -blur 0x8 -quality 60 -define webp:lossless=false "$PLACEHOLDER_TARGET"
+            fi
+            
+          done
+
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          
+          # Add all changes in images/ (excluding _source/ if we wanted, but _source/ is already committed by user)
+          # We primarily want to catch the new files in hero/, gallery/, etc.
+          git add images/
+          
+          # Check if there are changes to commit
+          if ! git diff --staged --quiet; then
+            git commit -m "auto: optimize images"
+            git push
+          else
+            echo "No changes to commit."
+          fi
